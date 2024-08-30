@@ -21,6 +21,9 @@ visited_urls = set()
 # Initialize a set for downloaded file URLs to avoid duplicate downloads
 downloaded_file_urls = set()
 
+# Initialize a set for directories
+existing_directories = set()
+
 # Initialize a session
 session = requests.Session()
 
@@ -73,7 +76,26 @@ def login():
         print("Login failed. Check your credentials.")
         print(response.text)
 
-def download_file(url):
+def extract_and_create_directory(url):
+    # Extract the text between the last two / in the URL
+    parts = url.split("/")
+    extracted_text = parts[-2]
+
+    # Create path to the new directory
+    directory_path = os.path.join(download_directory, extracted_text)
+
+    # Check if the extracted string exists in the set
+    if extracted_text in existing_directories:
+        return directory_path
+
+    # Check if the extracted string exists as a directory in the downloaded_files directory
+    if not os.path.exists(directory_path):
+        # If the directory doesn't exist, create it
+        os.makedirs(directory_path)
+    
+    return directory_path
+
+def download_file(url, parent_url):
     if url in downloaded_file_urls:
         print(f"File from {url} has already been downloaded. Skipping.")
         return None, None
@@ -81,34 +103,38 @@ def download_file(url):
     if 'drive.google.com' in url:
         file_id = url.split('/')[5]
         download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-        response = session.get(download_url)
+        response = session.get(download_url, allow_redirects=True)
 
         # Check if the response is an HTML indicating a Google Drive warning page
-        if "text/html" in response.headers["Content-Type"]:
+        if "text/html" in response.headers.get("Content-Type", ""):
             print('HTML response, file cannot be scanned') # Print to help debug
             soup = BeautifulSoup(response.text, "html.parser")
             
             # Find the form action for the "Download anyway" button
             form = soup.find("form", {"id": "download-form"})
             if form:
-                download_link = form["action"]
-                download_id = form.find("input", {"name": "id"})["value"]
-                download_url = f"https://drive.usercontent.google.com/download?id={download_id}"
+                confirm_url = form["action"]
+                form_data = {}
+                for input_tag in form.find_all("input"):
+                    name = input_tag.get("name")
+                    if name:
+                        form_data[name] = input_tag.get("value", '')
+
+                # Submit the form to confirm the download
+                response = session.get(confirm_url, params=form_data, allow_redirects=True)
                 
-                # Request the actual file download
-                response = session.get(download_url)
-        
-        filename = response.headers.get('Content-Disposition')
-        if filename:
-            filename = filename.split('filename=')[1].strip('"')
+        # Check the response headers to get the filename if available
+        content_disposition = response.headers.get('content-disposition')
+        if content_disposition:
+            filename = content_disposition.split('filename=')[-1].strip('"')
         else:
-            filename = f"{file_id}"
+            filename = f"{file_id}.rar"  # Default to .rar extension if no filename found
 
     else:
         response = session.get(url)
         filename = os.path.basename(url)
 
-    filepath = os.path.join(download_directory, filename)
+    filepath = os.path.join(extract_and_create_directory(parent_url), filename)
 
     # Check if the file already exists
     if os.path.exists(filepath):
@@ -165,10 +191,10 @@ def crawl_website(url):
         file_url = urljoin(url, link['href'])
 
         if 'drive.google.com' in file_url:
-            download_url, filename = download_file(file_url)
+            download_url, filename = download_file(file_url, parent_url=url)
             if filename:
                 update_json(crawled_url=url, google_drive_download_link=download_url,
-                            downloaded_file_name=filename, path_to_file=os.path.join(download_directory, filename))
+                            downloaded_file_name=filename, path_to_file=os.path.join(extract_and_create_directory(url), filename))
 
         elif 'https://kcserevision.com' in file_url and is_valid_url(file_url) and file_url not in visited_urls:
             crawl_website(file_url)
